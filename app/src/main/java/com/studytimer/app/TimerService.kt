@@ -15,6 +15,7 @@ import android.os.*
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -54,6 +55,7 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
     private var ttsReady = false
     private var wake: PowerManager.WakeLock? = null
     private var overlay: View? = null
+    private var strip: TextView? = null
     private var mp: MediaPlayer? = null
     private var totalMin = 0
     private var intervalMin = 0
@@ -92,6 +94,7 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
     private fun startTimer(t: Int, i: Int) {
         h.removeCallbacksAndMessages(null)
         removeOverlay()
+        removeStrip()
         totalMin = t; intervalMin = i
         totalMs = t * 60000L; intervalMs = i * 60000L
         elapsedMs = 0; nextIdx = 1
@@ -106,6 +109,7 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
             wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "studytimer:wake")
         }
         if (wake?.isHeld == false) wake?.acquire(totalMs + 60000L)
+        addStrip()
         h.post(tick)
     }
 
@@ -115,6 +119,7 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
             val now = SystemClock.elapsedRealtime()
             if (!paused) elapsedMs += now - lastReal
             lastReal = now
+            updateStrip()
             while (intervalMs > 0 && nextIdx * intervalMs <= elapsedMs && nextIdx * intervalMs < totalMs) {
                 val m = intervalMin * nextIdx
                 show("\uD83D\uDC4F", "Well done!", "You completed ${label(m)}!", false)
@@ -131,12 +136,14 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
         if (!paused) elapsedMs += now - lastReal
         lastReal = now
         paused = !paused
+        updateStrip()
         nm.notify(1, notif())
     }
 
     private fun finish() {
         elapsedMs = totalMs
         running = false; finished = true
+        updateStrip("\uD83C\uDFC6 Done!")
         show("\uD83C\uDFC6", "Congratulations!", "You completed ${label(totalMin)}!", true)
         val done = Notification.Builder(this, "timer")
             .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
@@ -150,6 +157,7 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
         running = false; paused = false; finished = false
         h.removeCallbacksAndMessages(null)
         removeOverlay()
+        removeStrip()
         try { mp?.release() } catch (e: Exception) {}
         mp = null
         tts?.stop()
@@ -162,6 +170,7 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
         running = false
         h.removeCallbacksAndMessages(null)
         removeOverlay()
+        removeStrip()
         try { mp?.release() } catch (e: Exception) {}
         tts?.shutdown()
         if (wake?.isHeld == true) wake?.release()
@@ -191,6 +200,67 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
         b.addAction(0, if (paused) "Resume" else "Pause", pause)
         b.addAction(0, "Stop", stop)
         return b.build()
+    }
+
+    private fun addStrip() {
+        removeStrip()
+        if (!Settings.canDrawOverlays(this)) return
+        val d = resources.displayMetrics.density
+        val t = TextView(this)
+        t.textSize = 14f
+        t.setTextColor(Color.WHITE)
+        t.setTypeface(null, Typeface.BOLD)
+        t.setPadding((12 * d).toInt(), (4 * d).toInt(), (12 * d).toInt(), (4 * d).toInt())
+        t.background = GradientDrawable().apply { setColor(0xCC000000.toInt()); cornerRadius = 20 * d }
+        val lp = WindowManager.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT)
+        lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        lp.y = (2 * d).toInt()
+        var sx = 0f
+        var sy = 0f
+        var moved = false
+        t.setOnTouchListener { _, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> { sx = e.rawX; sy = e.rawY; moved = false }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - sx
+                    val dy = e.rawY - sy
+                    if (Math.abs(dx) > 10 || Math.abs(dy) > 10) moved = true
+                    if (moved) {
+                        lp.x += dx.toInt(); lp.y += dy.toInt()
+                        sx = e.rawX; sy = e.rawY
+                        try { wm.updateViewLayout(t, lp) } catch (ex: Exception) {}
+                    }
+                }
+                MotionEvent.ACTION_UP -> if (!moved) {
+                    try {
+                        val i = Intent(this, MainActivity::class.java)
+                        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                        startActivity(i)
+                    } catch (ex: Exception) {}
+                }
+            }
+            true
+        }
+        try {
+            wm.addView(t, lp)
+            strip = t
+            updateStrip()
+        } catch (e: Exception) {}
+    }
+
+    private fun updateStrip(text: String? = null) {
+        strip?.text = text ?: ((if (paused) "\u23F8 " else "\u23F1 ") + fmt(totalMs - elapsedMs))
+    }
+
+    private fun removeStrip() {
+        strip?.let { try { wm.removeView(it) } catch (e: Exception) {} }
+        strip = null
     }
 
     private fun show(emoji: String, title: String, msg: String, final: Boolean) {
