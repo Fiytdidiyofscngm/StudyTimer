@@ -55,13 +55,18 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
     private var ttsReady = false
     private var wake: PowerManager.WakeLock? = null
     private var overlay: View? = null
-    private var strip: TextView? = null
+    private var stripRoot: View? = null
+    private var stripTime: TextView? = null
+    private var stripPause: TextView? = null
+    private var stripBtns: View? = null
     private var mp: MediaPlayer? = null
     private var totalMin = 0
     private var intervalMin = 0
     private var intervalMs = 0L
     private var nextIdx = 1
     private var lastReal = 0L
+
+    private val collapse = Runnable { stripBtns?.visibility = View.GONE }
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -202,16 +207,48 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
         return b.build()
     }
 
+    private fun armCollapse() {
+        h.removeCallbacks(collapse)
+        h.postDelayed(collapse, 6000)
+    }
+
+    private fun openApp() {
+        try {
+            val i = Intent(this, MainActivity::class.java)
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            startActivity(i)
+        } catch (ex: Exception) {}
+    }
+
     private fun addStrip() {
         removeStrip()
         if (!Settings.canDrawOverlays(this)) return
         val d = resources.displayMetrics.density
-        val t = TextView(this)
-        t.textSize = 14f
-        t.setTextColor(Color.WHITE)
-        t.setTypeface(null, Typeface.BOLD)
-        t.setPadding((12 * d).toInt(), (4 * d).toInt(), (12 * d).toInt(), (4 * d).toInt())
-        t.background = GradientDrawable().apply { setColor(0xCC000000.toInt()); cornerRadius = 20 * d }
+        fun dp(v: Int) = (v * d).toInt()
+
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.HORIZONTAL
+        box.gravity = Gravity.CENTER_VERTICAL
+        box.background = GradientDrawable().apply {
+            setColor(0xF04F46E5.toInt()); cornerRadius = 22 * d; setStroke(dp(1), Color.WHITE)
+        }
+        fun chip(t: String): TextView {
+            val x = TextView(this)
+            x.text = t; x.textSize = 14f; x.setTextColor(Color.WHITE)
+            x.setTypeface(null, Typeface.BOLD)
+            x.setPadding(dp(12), dp(8), dp(12), dp(8))
+            return x
+        }
+        val time = chip("")
+        val btns = LinearLayout(this)
+        btns.orientation = LinearLayout.HORIZONTAL
+        btns.visibility = View.GONE
+        val pauseB = chip("\u23F8 Pause")
+        val stopB = chip("\u23F9 Stop")
+        val openB = chip("\u2197 Open")
+        btns.addView(pauseB); btns.addView(stopB); btns.addView(openB)
+        box.addView(time); box.addView(btns)
+
         val lp = WindowManager.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -220,11 +257,14 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT)
         lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-        lp.y = (2 * d).toInt()
+        val sbId = resources.getIdentifier("status_bar_height", "dimen", "android")
+        val sb = if (sbId > 0) resources.getDimensionPixelSize(sbId) else dp(28)
+        lp.y = sb + dp(6)
+
         var sx = 0f
         var sy = 0f
         var moved = false
-        t.setOnTouchListener { _, e ->
+        time.setOnTouchListener { _, e ->
             when (e.action) {
                 MotionEvent.ACTION_DOWN -> { sx = e.rawX; sy = e.rawY; moved = false }
                 MotionEvent.ACTION_MOVE -> {
@@ -234,33 +274,37 @@ class TimerService : Service(), TextToSpeech.OnInitListener {
                     if (moved) {
                         lp.x += dx.toInt(); lp.y += dy.toInt()
                         sx = e.rawX; sy = e.rawY
-                        try { wm.updateViewLayout(t, lp) } catch (ex: Exception) {}
+                        try { wm.updateViewLayout(box, lp) } catch (ex: Exception) {}
                     }
                 }
                 MotionEvent.ACTION_UP -> if (!moved) {
-                    try {
-                        val i = Intent(this, MainActivity::class.java)
-                        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                        startActivity(i)
-                    } catch (ex: Exception) {}
+                    val showing = btns.visibility == View.VISIBLE
+                    btns.visibility = if (showing) View.GONE else View.VISIBLE
+                    if (!showing) armCollapse()
                 }
             }
             true
         }
+        pauseB.setOnClickListener { togglePause(); armCollapse() }
+        stopB.setOnClickListener { stopAll() }
+        openB.setOnClickListener { btns.visibility = View.GONE; openApp() }
+
         try {
-            wm.addView(t, lp)
-            strip = t
+            wm.addView(box, lp)
+            stripRoot = box; stripTime = time; stripPause = pauseB; stripBtns = btns
             updateStrip()
         } catch (e: Exception) {}
     }
 
     private fun updateStrip(text: String? = null) {
-        strip?.text = text ?: ((if (paused) "\u23F8 " else "\u23F1 ") + fmt(totalMs - elapsedMs))
+        stripTime?.text = text ?: ((if (paused) "\u23F8 " else "\u23F1 ") + fmt(totalMs - elapsedMs))
+        stripPause?.text = if (paused) "\u25B6 Resume" else "\u23F8 Pause"
     }
 
     private fun removeStrip() {
-        strip?.let { try { wm.removeView(it) } catch (e: Exception) {} }
-        strip = null
+        h.removeCallbacks(collapse)
+        stripRoot?.let { try { wm.removeView(it) } catch (e: Exception) {} }
+        stripRoot = null; stripTime = null; stripPause = null; stripBtns = null
     }
 
     private fun show(emoji: String, title: String, msg: String, final: Boolean) {
